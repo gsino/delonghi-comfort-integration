@@ -15,6 +15,7 @@ from .const import (
     CONF_SCAN_INTERVAL,
 )
 from .api import DeLonghiAPI
+from .auth_diagnostics import AuthDiagnostics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +64,9 @@ class DelonghiComfortConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "invalid_auth"
             except Exception as e:
-                _LOGGER.error("Unexpected error during authentication: %s", e)
+                diagnostic = AuthDiagnostics()
+                diagnostic.start("C1 config_flow")
+                diagnostic.failure("config_flow_exception", e)
                 errors["base"] = "cannot_connect"
 
         return self.async_show_form(
