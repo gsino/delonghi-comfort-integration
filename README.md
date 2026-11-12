@@ -5,6 +5,8 @@
 
 This repository contains a comprehensive Home Assistant integration for De'Longhi Comfort air conditioning and dehumidification devices. The integration provides full control and monitoring capabilities through Home Assistant's user interface.
 
+Authentication diagnostics for v0.1.1: [analysis, installation and safe log collection](AUTHENTICATION_DIAGNOSTICS.md).
+
 ## ⚠️ Disclaimer
 
 **IMPORTANT**: This integration is provided "as-is" without any warranty or guarantee. The author takes no responsibility for any damage, data loss, or issues that may arise from using this integration. Use at your own risk.

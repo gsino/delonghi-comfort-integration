@@ -8,6 +8,8 @@ from typing import Any
 
 import aiohttp
 
+from .auth_diagnostics import AuthDiagnostics
+
 from .const import (
     API_KEY,
     CLIENT_ID,
@@ -57,17 +59,18 @@ class DeLonghiAPI:
             self.access_token = await self._get_new_access_token()
             return self.access_token is not None
         except Exception as e:
-            _LOGGER.error("Authentication failed: %s", e)
+            AuthDiagnostics().failure("authentication_exception", e)
             return False
 
     async def _get_new_access_token(self) -> str | None:
         """Get a new access token through the full authentication flow."""
 
-        
+        diagnostic = AuthDiagnostics()
         # Thanks to https://github.com/duckwc/ECAMpy for the code to token convertion
         # Thanks to https://github.com/rtfpessoa/delonghi-comfort-client, for the cli code to implement the authentication flow
         try:
             # Step 1: Start authentication process
+            diagnostic.start("01 authorize")
             async with self.session.get(
                 f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/authorize",
                 headers={"User-Agent": BROWSER_USER_AGENT},
@@ -80,9 +83,14 @@ class DeLonghiAPI:
                 },
                 allow_redirects=False,
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("extract_context")
                 context = self.get_query_param(response.headers["Location"], "context")
+                diagnostic.query("context", context)
+            diagnostic.success()
 
             # Step 2: Fetch Gigya session data
+            diagnostic.start("02 socialize.getIDs")
             async with self.session.get(
                 "https://socialize.eu1.gigya.com/socialize.getIDs",
                 headers={"User-Agent": BROWSER_USER_AGENT},
@@ -95,14 +103,21 @@ class DeLonghiAPI:
                     "format": "json",
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 data = await response.text()
+                diagnostic.phase_at("parse_json")
                 data = json.loads(data)
 
+            diagnostic.fields(data, (("ucid",), ("gmid",), ("gmidTicket",)))
+            diagnostic.phase_at("extract_session_fields")
             ucid = data["ucid"]
             gmid = data["gmid"]
             gmid_ticket = data["gmidTicket"]
+            diagnostic.success()
 
             # Step 3: Login
+            diagnostic.start("03 accounts.login")
             risk_context_json = json.dumps(
                 {
                     "b0": 4494,
@@ -171,18 +186,24 @@ class DeLonghiAPI:
                     "format": "json",
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 login_data = await response.text()
+                diagnostic.phase_at("parse_json")
                 login_data = json.loads(login_data)
 
+            diagnostic.fields(login_data, (("statusCode",), ("sessionInfo", "login_token")))
+            diagnostic.phase_at("check_login_status")
             if login_data.get("statusCode") != 200:
-                _LOGGER.error(
-                    "Login failed: %s", login_data.get("errorDetails", "Unknown error")
-                )
+                diagnostic.failure("login_status_not_200")
                 return None
 
+            diagnostic.phase_at("extract_login_token")
             login_token = login_data["sessionInfo"]["login_token"]
+            diagnostic.success()
 
             # Step 4: Get user info
+            diagnostic.start("04 socialize.getUserInfo")
             async with self.session.post(
                 "https://socialize.eu1.gigya.com/socialize.getUserInfo",
                 headers={"User-Agent": BROWSER_USER_AGENT},
@@ -199,14 +220,21 @@ class DeLonghiAPI:
                     "format": "json",
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 user_data = await response.text()
+                diagnostic.phase_at("parse_json")
                 user_data = json.loads(user_data)
 
+            diagnostic.fields(user_data, (("UID",), ("UIDSignature",), ("signatureTimestamp",)))
+            diagnostic.phase_at("extract_user_fields")
             user_uid = user_data["UID"]
             user_uid_signature = user_data["UIDSignature"]
             user_signature_timestamp = user_data["signatureTimestamp"]
+            diagnostic.success()
 
             # Step 5: Consent
+            diagnostic.start("05 OIDCConsentPage.php")
             async with self.session.get(
                 "https://aylaopenid.delonghigroup.com/OIDCConsentPage.php",
                 headers={"User-Agent": BROWSER_USER_AGENT},
@@ -220,11 +248,18 @@ class DeLonghiAPI:
                     "signatureTimestamp": user_signature_timestamp,
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 consent_text = await response.text()
 
+            diagnostic.phase_at("inspect_consent_html")
+            diagnostic.consent(consent_text)
+            diagnostic.phase_at("extract_signature")
             signature = consent_text.split("const consentObj2Sig = '")[1].split("';")[0]
+            diagnostic.success()
 
             # Step 6: Authorization
+            diagnostic.start("06 authorize/continue")
             async with self.session.get(
                 f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/authorize/continue",
                 headers={"User-Agent": BROWSER_USER_AGENT},
@@ -246,9 +281,14 @@ class DeLonghiAPI:
                 },
                 allow_redirects=False,
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("extract_code")
                 code = self.get_query_param(response.headers["Location"], "code")
+                diagnostic.query("code", code)
+            diagnostic.success()
 
             # Step 7: Get IDP access token
+            diagnostic.start("07 Gigya token")
             async with self.session.post(
                 f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{API_KEY}/token",
                 headers={
@@ -262,12 +302,19 @@ class DeLonghiAPI:
                     "redirect_uri": "https://google.it",
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 token_data = await response.text()
+                diagnostic.phase_at("parse_json")
                 token_data = json.loads(token_data)
 
+            diagnostic.fields(token_data, (("access_token",),))
+            diagnostic.phase_at("extract_idp_token")
             idp_token = token_data["access_token"]
+            diagnostic.success()
 
             # Step 8: Exchange IDP token for Ayla token
+            diagnostic.start("08 Ayla token_sign_in")
             async with self.session.post(
                 "https://user-field-eu.aylanetworks.com/api/v1/token_sign_in",
                 headers={"User-Agent": TOKEN_USER_AGENT},
@@ -277,19 +324,30 @@ class DeLonghiAPI:
                     "token": idp_token,
                 },
             ) as response:
+                diagnostic.response(response)
+                diagnostic.phase_at("read_body")
                 ayla_data = await response.text()
+                diagnostic.phase_at("parse_json")
                 ayla_data = json.loads(ayla_data)
 
+            diagnostic.fields(ayla_data, (("refresh_token",), ("access_token",)))
+            diagnostic.phase_at("extract_ayla_tokens")
             self.refresh_token = ayla_data["refresh_token"]
-            return ayla_data["access_token"]
+            # Preserve the original assignment order and lookup failure behavior.
+            access_token = ayla_data["access_token"]
+            diagnostic.success()
+            return access_token
 
         except Exception as e:
-            _LOGGER.error("Failed to get access token: %s", e)
+            diagnostic.failure("access_token_exception", e)
             return None
 
     async def refresh_access_token(self) -> str | None:
         """Refresh the access token using the refresh token."""
+        diagnostic = AuthDiagnostics()
+        diagnostic.start("R1 Ayla refresh_token")
         if not self.refresh_token:
+            diagnostic.phase_at("no_refresh_token_fallback")
             return await self._get_new_access_token()
 
         try:
@@ -301,21 +359,26 @@ class DeLonghiAPI:
                 },
                 json={"user": {"refresh_token": self.refresh_token}},
             ) as response:
+                diagnostic.response(response)
                 if response.status == 200:
+                    diagnostic.phase_at("parse_json")
                     data = await response.json()
+                    diagnostic.fields(data, (("access_token",), ("refresh_token",)))
+                    diagnostic.phase_at("extract_refreshed_tokens")
                     new_access_token = data["access_token"]
                     new_refresh_token = data.get("refresh_token")
 
                     if new_refresh_token:
                         self.refresh_token = new_refresh_token
 
+                    diagnostic.success()
                     return new_access_token
 
-                _LOGGER.warning("Failed to refresh token, falling back to login")
+                diagnostic.phase_at("http_status_fallback_to_login")
                 return await self._get_new_access_token()
 
         except Exception as e:
-            _LOGGER.error("Failed to refresh access token: %s", e)
+            diagnostic.failure("refresh_exception_fallback_to_login", e)
             return await self._get_new_access_token()
 
     async def get_devices(self) -> list[dict[str, Any]]:
